@@ -37,6 +37,10 @@ module OmniAuth
         # This means while it's not suitable for consistently identifying a user
         # (the domain might change), it is suitable for verifying membership in
         # a given domain.
+        if ENV["MICROSOFT_GRAPH_DOMAIN_VERIFIER_DEBUG"]
+          Rails.logger.info("MICROSOFT_GRAPH::DomainVerifier email_domain: #{email_domain}, upn_domain: #{upn_domain}")
+        end
+
         return true if email_domain == upn_domain ||
           skip_verification == true ||
           (skip_verification.is_a?(Array) && skip_verification.include?(email_domain)) ||
