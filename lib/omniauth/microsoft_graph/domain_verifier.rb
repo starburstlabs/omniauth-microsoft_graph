@@ -36,17 +36,21 @@ module OmniAuth
         # This means while it's not suitable for consistently identifying a user
         # (the domain might change), it is suitable for verifying membership in
         # a given domain.
-        return true if email_domain == upn_domain ||
-          skip_verification == true ||
-          (skip_verification.is_a?(Array) && skip_verification.include?(email_domain)) ||
-          domain_verified_jwt_claim
+        # return true if email_domain == upn_domain ||
+        #   skip_verification == true ||
+        #   (skip_verification.is_a?(Array) && skip_verification.include?(email_domain))
+
+        # Try domain_verified_jwt_claim check
+        xms_edov_result = check_xms_edov
+        return true if xms_edov_result == :valid
+
+        # If we get here, verification failed - determine why
+        error_key = determine_error_key(xms_edov_result)
+        error_message = build_error_message(xms_edov_result)
 
         # Use CallbackError to ensure the error is properly caught by the callback_phase
         # rescue clause and converted to an OmniAuth failure instead of bubbling up as a 500 error.
-        raise OmniAuth::Strategies::OAuth2::CallbackError.new(
-          :domain_verification_failed,
-          verification_error_message
-        )
+        raise OmniAuth::Strategies::OAuth2::CallbackError.new(error_key, error_message)
       end
 
       private
@@ -65,20 +69,81 @@ module OmniAuth
       #
       # To get to it, we need to decode the ID token with the key material from Microsoft's
       # OIDC configuration endpoint, and inspect it for the claim in question.
-      def domain_verified_jwt_claim
+      def check_xms_edov
         oidc_config = access_token.get(OIDC_CONFIG_URL).parsed
         algorithms = oidc_config['id_token_signing_alg_values_supported']
         jwks = get_jwks(oidc_config)
         decoded_token = JWT.decode(id_token, nil, true, algorithms: algorithms, jwks: jwks)
-        xms_edov_valid?(decoded_token)
-      rescue JWT::VerificationError, ::OAuth2::Error
-        false
+
+        xms_edov_value = decoded_token.first['xms_edov']
+
+        if xms_edov_value.nil?
+          :missing
+        elsif ['1', 1, 'true', true].include?(xms_edov_value)
+          :valid
+        else
+          :false
+        end
+      rescue JWT::VerificationError, ::OAuth2::Error => e
+        :error
       end
 
-      def xms_edov_valid?(decoded_token)
-        # https://github.com/MicrosoftDocs/azure-docs/issues/111425#issuecomment-1761043378
-        # Comments seemed to indicate the value is not consistent
-        ['1', 1, 'true', true].include?(decoded_token.first['xms_edov'])
+      def determine_error_key(xms_edov_result)
+        case xms_edov_result
+        when :missing
+          :domain_verification_xms_edov_missing
+        when :false
+          :domain_verification_xms_edov_false
+        when :error
+          :domain_verification_xms_edov_error
+        else
+          :domain_verification_failed
+        end
+      end
+
+      def build_error_message(xms_edov_result)
+        base_msg = "The email domain '#{email_domain}' does not match the principal domain '#{upn_domain}'."
+
+        case xms_edov_result
+        when :missing
+          <<~MSG
+            #{base_msg}
+
+            The xms_edov claim is missing from the token, which could verify your email domain.
+            Please ensure the xms_edov optional claim is configured in your Azure app registration.
+
+            You can either:
+              * Configure the xms_edov optional claim in Azure (recommended)
+              * Update the user's email to match the principal domain '#{upn_domain}'
+              * Skip verification on the '#{email_domain}' domain (not recommended)
+            Refer to the README for more details.
+          MSG
+        when :false
+          <<~MSG
+            #{base_msg}
+
+            The xms_edov claim indicates that '#{email_domain}' is NOT a verified domain in your Azure tenant.
+
+            You can either:
+              * Add '#{email_domain}' as a verified custom domain in Azure Entra ID
+              * Update the user's email to match the principal domain '#{upn_domain}'
+              * Skip verification on the '#{email_domain}' domain (not recommended)
+            Refer to the README for more details.
+          MSG
+        when :error
+          <<~MSG
+            #{base_msg}
+
+            Unable to verify the xms_edov claim (token validation error).
+
+            You can either:
+              * Update the user's email to match the principal domain '#{upn_domain}'
+              * Skip verification on the '#{email_domain}' domain (not recommended)
+            Refer to the README for more details.
+          MSG
+        else
+          verification_error_message
+        end
       end
 
       def get_jwks(oidc_config)
